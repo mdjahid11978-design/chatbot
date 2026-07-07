@@ -18,6 +18,7 @@ import {
   chatModels,
   DEFAULT_CHAT_MODEL,
   getCapabilities,
+  getModelAvailability,
 } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
@@ -41,12 +42,20 @@ import {
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
 import { checkIpRateLimit } from "@/lib/ratelimit";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, WaitingStatusData } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
 export const maxDuration = 60;
+
+const HEALTH_CHECK_DELAY_MS = 9000;
+
+function isModelStreamActivity(chunk: { type: string }) {
+  return !["start", "start-step", "finish-step", "finish", "raw"].includes(
+    chunk.type
+  );
+}
 
 function getStreamContext() {
   try {
@@ -192,6 +201,68 @@ export async function POST(request: Request) {
     const stream = createUIMessageStream({
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
+        const modelName = modelConfig?.name ?? chatModel;
+        let hasModelActivity = false;
+        let healthCheckTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const clearHealthCheckTimer = () => {
+          if (healthCheckTimer) {
+            clearTimeout(healthCheckTimer);
+          }
+        };
+
+        const writeWaitingStatus = (
+          phase: WaitingStatusData["phase"],
+          messageText: string
+        ) => {
+          if (hasModelActivity && phase !== "thinking") {
+            return;
+          }
+          dataStream.write({
+            type: "data-waiting-status",
+            data: {
+              phase,
+              message: messageText,
+              modelId: chatModel,
+              modelName,
+            },
+            transient: true,
+          });
+        };
+
+        writeWaitingStatus("waiting", "Waiting...");
+
+        healthCheckTimer = setTimeout(() => {
+          getModelAvailability(chatModel)
+            .then((availability) => {
+              if (availability === "impacted") {
+                writeWaitingStatus(
+                  "health",
+                  `${modelName} may be slow or unavailable right now...`
+                );
+              } else {
+                writeWaitingStatus("still-waiting", "Still waiting...");
+              }
+            })
+            .catch(() => {
+              writeWaitingStatus("still-waiting", "Still waiting...");
+            });
+        }, HEALTH_CHECK_DELAY_MS);
+
+        const markModelActive = () => {
+          if (hasModelActivity) {
+            return;
+          }
+          hasModelActivity = true;
+          clearHealthCheckTimer();
+          writeWaitingStatus("thinking", "Thinking...");
+        };
+
+        const stopWaitingStatus = () => {
+          hasModelActivity = true;
+          clearHealthCheckTimer();
+        };
+
         const result = streamText({
           model: getLanguageModel(chatModel),
           instructions: systemPrompt({ requestHints, supportsTools }),
@@ -233,6 +304,20 @@ export async function POST(request: Request) {
               dataStream,
               modelId: chatModel,
             }),
+          },
+          onChunk({ chunk }) {
+            if (isModelStreamActivity(chunk)) {
+              markModelActive();
+            }
+          },
+          onEnd() {
+            stopWaitingStatus();
+          },
+          onError() {
+            stopWaitingStatus();
+          },
+          onAbort() {
+            stopWaitingStatus();
           },
           telemetry: {
             isEnabled: isProductionEnvironment,
