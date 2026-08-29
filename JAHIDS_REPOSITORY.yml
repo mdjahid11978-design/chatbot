@@ -1,0 +1,17 @@
+schema: jahids.ai/repository-standard/v1
+canonical_platform: mdjahid11978-design/jahids.ai
+classification: upstream_adapted_or_maintained
+presentation:
+  standard: JAHIDS.AI repository ecosystem
+  preserve_project_identity: true
+branding:
+  banner: assets/jahids-ai-banner.svg
+  standard: JAHIDS.AI ecosystem presentation
+verification:
+  production_claims_require_evidence: true
+provenance:
+  third_party_rights_preserved: true
+  attribution_required: true
+ownership:
+  original_project: open_source_upstream
+  repository_maintenance: mdjahid11978-design
